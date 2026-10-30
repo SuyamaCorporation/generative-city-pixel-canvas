@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ジェネラティブ 都市 ピクセル Canvas</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+body { background: #0a0a1a; }
+canvas { image-rendering: pixelated; image-rendering: crisp-edges; }
+</style>
+</head>
+<body class="min-h-screen text-white font-sans p-4">
+<div class="max-w-4xl mx-auto">
+  <h1 class="text-2xl font-bold text-center mb-1 text-yellow-400">🏙️ ジェネラティブ 都市 ピクセル</h1>
+  <p class="text-center text-gray-400 text-sm mb-3">Seed値から決定論的に都市景観を生成</p>
+
+  <!-- Controls -->
+  <div class="bg-gray-800 rounded-xl p-3 mb-3 flex flex-wrap gap-3 items-center justify-between">
+    <div class="flex items-center gap-2">
+      <label class="text-sm text-gray-400" for="seedInput">Seed:</label>
+      <input id="seedInput" type="number" value="42" class="bg-gray-700 text-white rounded px-3 py-1 w-28 border border-gray-600 text-sm" aria-label="シード値">
+      <button onclick="regenerate()" class="bg-yellow-600 hover:bg-yellow-500 text-black font-bold px-3 py-1 rounded-lg text-sm" aria-label="生成">生成</button>
+      <button onclick="randomSeed()" class="bg-gray-600 hover:bg-gray-500 text-white font-bold px-3 py-1 rounded-lg text-sm" aria-label="ランダムseed">🎲 乱数</button>
+    </div>
+    <div class="flex items-center gap-2">
+      <label class="text-sm text-gray-400">時刻:</label>
+      <button onclick="setTime('day')" id="btnDay" class="px-3 py-1 rounded-lg text-sm font-bold bg-yellow-500 text-black" aria-label="昼景">☀️ 昼</button>
+      <button onclick="setTime('dusk')" id="btnDusk" class="px-3 py-1 rounded-lg text-sm font-bold bg-gray-600 text-white" aria-label="夕景">🌅 夕</button>
+      <button onclick="setTime('night')" id="btnNight" class="px-3 py-1 rounded-lg text-sm font-bold bg-gray-600 text-white" aria-label="夜景">🌙 夜</button>
+    </div>
+    <div class="flex items-center gap-2">
+      <label class="text-sm text-gray-400">ビル密度:</label>
+      <input type="range" id="density" min="5" max="30" value="15" oninput="regenerate()" class="w-24" aria-label="ビル密度" style="accent-color:#fbbf24">
+      <span id="vDensity" class="text-xs">15</span>
+    </div>
+    <button onclick="downloadCanvas()" class="bg-blue-700 hover:bg-blue-600 text-white font-bold px-3 py-1 rounded-lg text-sm" aria-label="ダウンロード">💾 保存</button>
+  </div>
+
+  <!-- Canvas -->
+  <div class="flex justify-center">
+    <canvas id="canvas" width="800" height="400" class="rounded-xl border border-gray-700 w-full max-w-3xl" aria-label="ジェネラティブ都市景観"></canvas>
+  </div>
+
+  <!-- Info -->
+  <div class="bg-gray-800 rounded-xl p-2 mt-3 text-xs text-gray-400 flex flex-wrap gap-4">
+    <span>Seed: <span id="infoSeed" class="text-white font-mono">42</span></span>
+    <span>ビル数: <span id="infoBldg" class="text-white">0</span></span>
+    <span>最高ビル: <span id="infoTall" class="text-white">0</span>px</span>
+    <span>総窓数: <span id="infoWindows" class="text-white">0</span></span>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+// LCG pseudo-random number generator
+class LCG {
+  constructor(seed){ this.s = seed >>> 0; }
+  next(){ this.s = (this.s * 1664525 + 1013904223) >>> 0; return this.s / 0xFFFFFFFF; }
+  int(min, max){ return Math.floor(this.next() * (max-min+1)) + min; }
+  bool(prob=0.5){ return this.next() < prob; }
+  pick(arr){ return arr[this.int(0,arr.length-1)]; }
+}
+
+let timeMode = 'night';
+let currentSeed = 42;
+
+const TIME_PALETTES = {
+  day: {
+    sky: ['#87CEEB','#a8d8ea','#c2e9f5'],
+    ground: '#6b7280',
+    road: '#4b5563',
+    buildingBase: (rng)=>[
+      `rgb(${rng.int(120,200)},${rng.int(120,200)},${rng.int(130,210)})`,
+      `rgb(${rng.int(150,220)},${rng.int(130,180)},${rng.int(100,150)})`
+    ],
+    windowLit: ()=>`rgba(255,255,200,0.9)`,
+    windowDark: ()=>`rgba(100,120,160,0.8)`,
+    litProb: 0.3,
+    sunMoon: {x:650, y:60, r:35, color:'#ffd700', glow:'rgba(255,200,0,0.3)'}
+  },
+  dusk: {
+    sky: ['#1a1030','#4a2040','#c05020','#ff7030','#ffb060'],
+    ground: '#3d2f2f',
+    road: '#2a2020',
+    buildingBase: (rng)=>[
+      `rgb(${rng.int(40,80)},${rng.int(30,60)},${rng.int(60,100)})`,
+      `rgb(${rng.int(60,100)},${rng.int(40,70)},${rng.int(50,80)})`
+    ],
+    windowLit: ()=>`rgba(255,150,50,0.9)`,
+    windowDark: ()=>`rgba(30,20,40,0.9)`,
+    litProb: 0.5,
+    sunMoon: {x:700, y:350, r:50, color:'#ff4500', glow:'rgba(255,100,0,0.5)'}
+  },
+  night: {
+    sky: ['#000010','#000820','#001030'],
+    ground: '#1a1a1a',
+    road: '#111111',
+    buildingBase: (rng)=>[
+      `rgb(${rng.int(15,50)},${rng.int(15,50)},${rng.int(20,70)})`,
+      `rgb(${rng.int(20,60)},${rng.int(20,55)},${rng.int(30,80)})`
+    ],
+    windowLit: ()=>`rgba(255,240,100,${0.7+Math.random()*0.3})`,
+    windowDark: ()=>`rgba(10,15,30,0.95)`,
+    litProb: 0.65,
+    sunMoon: {x:100, y:70, r:28, color:'#ddeeff', glow:'rgba(180,220,255,0.3)'}
+  }
+};
+
+function drawSky(pal){
+  const grad = ctx.createLinearGradient(0,0,0,H*0.65);
+  const colors = pal.sky;
+  colors.forEach((c,i)=>grad.addColorStop(i/(colors.length-1),c));
+  ctx.fillStyle=grad;
+  ctx.fillRect(0,0,W,H);
+}
+
+function drawStars(rng){
+  if(timeMode!=='night'&&timeMode!=='dusk') return;
+  const alpha = timeMode==='night'?0.9:0.3;
+  ctx.fillStyle=`rgba(255,255,255,${alpha})`;
+  for(let i=0;i<200;i++){
+    const sx=rng.next()*W, sy=rng.next()*H*0.5;
+    const sr=rng.next()*1.5;
+    ctx.beginPath();
+    ctx.arc(sx,sy,sr,0,Math.PI*2);
+    ctx.fill();
+  }
+}
+
+function drawSunMoon(pal){
+  const sm = pal.sunMoon;
+  // Glow
+  const grd = ctx.createRadialGradient(sm.x,sm.y,0,sm.x,sm.y,sm.r*3);
+  grd.addColorStop(0,sm.glow);
+  grd.addColorStop(1,'transparent');
+  ctx.fillStyle=grd;
+  ctx.fillRect(sm.x-sm.r*3,sm.y-sm.r*3,sm.r*6,sm.r*6);
+  // Body
+  ctx.beginPath();
+  ctx.arc(sm.x,sm.y,sm.r,0,Math.PI*2);
+  ctx.fillStyle=sm.color;
+  ctx.fill();
+}
+
+function drawGround(pal, density){
+  // Ground
+  ctx.fillStyle=pal.ground;
+  ctx.fillRect(0,H*0.75,W,H*0.25);
+  // Road
+  ctx.fillStyle=pal.road;
+  ctx.fillRect(0,H*0.82,W,H*0.12);
+  // Road markings
+  ctx.fillStyle='rgba(255,255,200,0.4)';
+  ctx.setLineDash([30,20]);
+  ctx.strokeStyle='rgba(255,255,200,0.4)';
+  ctx.lineWidth=2;
+  ctx.beginPath();
+  ctx.moveTo(0,H*0.88); ctx.lineTo(W,H*0.88);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function drawBuildings(rng, pal, density){
+  const groundY = H*0.75;
+  const pw = 2; // pixel size
+  const bldgW = Math.floor(W/density);
+  let totalWindows=0, maxH=0;
+  const bldgCount = density;
+
+  // Sort by depth (back to front)
+  const buildings = [];
+  for(let b=0;b<bldgCount;b++){
+    const bx = b*bldgW + rng.int(0,bldgW/3);
+    const bw = rng.int(bldgW*0.6, bldgW*1.2);
+    const bh = rng.int(H*0.15, H*0.65);
+    const layer = rng.int(0,2); // 0=back,1=mid,2=front
+    buildings.push({bx,bw,bh,layer,b});
+  }
+  buildings.sort((a,b)=>a.layer-b.layer);
+
+  for(const {bx,bw,bh,layer} of buildings){
+    const by = groundY - bh;
+    const alpha = layer===0?0.5:layer===1?0.75:1.0;
+    const colors = pal.buildingBase(rng);
+    const baseColor = rng.pick(colors);
+
+    // Building body
+    ctx.globalAlpha=alpha;
+    ctx.fillStyle=baseColor;
+    ctx.fillRect(bx, by, bw, bh);
+
+    // Darker side
+    ctx.fillStyle='rgba(0,0,0,0.2)';
+    ctx.fillRect(bx+bw-4, by, 4, bh);
+
+    // Roof detail
+    ctx.fillStyle='rgba(0,0,0,0.4)';
+    ctx.fillRect(bx, by, bw, 4);
+    // Antenna
+    if(rng.bool(0.4)){
+      ctx.fillStyle=timeMode==='night'?'rgba(255,100,100,0.8)':'rgba(100,100,100,0.8)';
+      ctx.fillRect(bx+bw/2-1, by-rng.int(10,30), 2, rng.int(10,30));
+      if(timeMode==='night'){ // blink light
+        ctx.fillStyle='rgba(255,50,50,0.9)';
+        ctx.beginPath();
+        ctx.arc(bx+bw/2, by-1, 3, 0, Math.PI*2);
+        ctx.fill();
+      }
+    }
+
+    // Windows
+    const wSize = 5; const wGap = 4;
+    const cols = Math.floor((bw-6)/(wSize+wGap));
+    const rows = Math.floor((bh-10)/(wSize+wGap));
+    for(let row=0;row<rows;row++){
+      for(let col=0;col<cols;col++){
+        const wx = bx+3+col*(wSize+wGap);
+        const wy = by+6+row*(wSize+wGap);
+        const lit = rng.bool(pal.litProb);
+        ctx.fillStyle = lit ? pal.windowLit() : pal.windowDark();
+        ctx.fillRect(wx, wy, wSize, wSize);
+        if(lit && timeMode==='night'){
+          ctx.fillStyle='rgba(255,255,150,0.15)';
+          ctx.fillRect(wx-1, wy-1, wSize+2, wSize+2);
+        }
+        totalWindows++;
+      }
+    }
+    if(bh>maxH) maxH=bh;
+    ctx.globalAlpha=1;
+  }
+
+  // Cars
+  const carColors=['#ef4444','#3b82f6','#22c55e','#f59e0b','#a855f7','#ffffff'];
+  for(let i=0;i<rng.int(3,8);i++){
+    const cx=rng.int(0,W-40);
+    const ccolor=rng.pick(carColors);
+    const cy=H*0.84+rng.int(0,10);
+    ctx.fillStyle=ccolor;
+    ctx.fillRect(cx,cy,28,10);
+    ctx.fillStyle='rgba(0,0,0,0.5)';
+    ctx.fillRect(cx+4,cy+2,20,6);
+    // wheels
+    ctx.fillStyle='#111';
+    ctx.fillRect(cx+2,cy+8,6,4);ctx.fillRect(cx+20,cy+8,6,4);
+    // headlights at night
+    if(timeMode==='night'){
+      ctx.fillStyle='rgba(255,255,200,0.8)';
+      ctx.fillRect(cx+24,cy+2,3,4);
+    }
+  }
+
+  document.getElementById('infoBldg').textContent=bldgCount;
+  document.getElementById('infoTall').textContent=Math.round(maxH);
+  document.getElementById('infoWindows').textContent=totalWindows;
+}
+
+function generate(seed){
+  currentSeed=seed;
+  const rng = new LCG(seed);
+  const pal = TIME_PALETTES[timeMode];
+  ctx.clearRect(0,0,W,H);
+  drawSky(pal);
+  drawStars(rng);
+  drawSunMoon(pal);
+  const density=parseInt(document.getElementById('density').value);
+  document.getElementById('vDensity').textContent=density;
+  drawBuildings(rng, pal, density);
+  drawGround(pal, density);
+  document.getElementById('infoSeed').textContent=seed;
+}
+
+function regenerate(){
+  const s=parseInt(document.getElementById('seedInput').value)||42;
+  generate(s);
+}
+function randomSeed(){
+  const s=Math.floor(Math.random()*999999);
+  document.getElementById('seedInput').value=s;
+  generate(s);
+}
+function setTime(t){
+  timeMode=t;
+  ['day','dusk','night'].forEach(m=>{
+    const btn=document.getElementById('btn'+m.charAt(0).toUpperCase()+m.slice(1));
+    if(m===t) btn.className='px-3 py-1 rounded-lg text-sm font-bold bg-yellow-500 text-black';
+    else btn.className='px-3 py-1 rounded-lg text-sm font-bold bg-gray-600 text-white';
+  });
+  regenerate();
+}
+function downloadCanvas(){
+  const a=document.createElement('a');
+  a.download='pixel-city-seed'+currentSeed+'.png';
+  a.href=canvas.toDataURL();
+  a.click();
+}
+
+generate(42);
+</script>
+</body>
+</html>
